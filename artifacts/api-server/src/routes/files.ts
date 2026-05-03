@@ -115,7 +115,6 @@ router.get("/hls/:id/:seg", async (req, res) => {
       res.status(404).send("Segment not ready");
       return;
     }
-    // Cache segments aggressively — they never change
     res.setHeader("Content-Type", "video/mp2t");
     res.setHeader("Cache-Control", "public, max-age=3600, immutable");
     const stream = fs.createReadStream(segPath);
@@ -187,12 +186,6 @@ router.get("/stream-page/:id", async (req, res) => {
       const nativeBrowserFmts = ["video/mp4", "video/webm", "video/ogg"];
       const canPlayNative     = nativeBrowserFmts.includes(file.mimeType || "");
 
-      // ─── Media Player HTML ────────────────────────────────────────────────
-      // Video.js + videojs-http-streaming (VHS):
-      //  - Lightweight (~200KB), plays ALL formats via HLS transcoding
-      //  - Native MP4/WebM: uses HLS for best seek performance
-      //  - MKV/AVI/MOV/etc: HLS transcode path via ffmpeg
-      //  - Full controls: seek, volume, quality, fullscreen, PiP
       let mediaPlayer = "";
 
       if (isVideo) {
@@ -327,11 +320,59 @@ router.get("/stream-page/:id", async (req, res) => {
       background: #000;
       font-family: 'Inter', sans-serif;
     }
-    .video-js .vjs-tech { position: relative !important; }
+    /* CRITICAL: absolute positioning lets vjs-tech fill the container correctly */
+    .video-js .vjs-tech {
+      position: absolute !important;
+      top: 0; left: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+    .video-js.vjs-fill {
+      width: 100% !important;
+      height: 100% !important;
+    }
     .vjs-fluid, .vjs-fluid.vjs-4-3, .vjs-fluid.vjs-16-9 {
       padding-top: 0 !important;
     }
-    .video-js video { width: 100%; height: auto; display: block; max-height: 75vh; }
+    /* Normal mode: fill container, object-fit keeps aspect ratio */
+    .video-js video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+      background: #000;
+    }
+    /* ── FULLSCREEN: cover entire screen with no gaps or clipping ── */
+    .video-js.vjs-fullscreen {
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      max-width: none !important;
+      max-height: none !important;
+      z-index: 99999 !important;
+      border-radius: 0 !important;
+      border: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      background: #000 !important;
+    }
+    .video-js.vjs-fullscreen video {
+      width: 100% !important;
+      height: 100% !important;
+      max-height: none !important;
+      object-fit: contain !important;
+    }
+    .video-js.vjs-fullscreen .vjs-tech {
+      width: 100% !important;
+      height: 100% !important;
+    }
+    /* Prevent parent container from clipping the fullscreen player */
+    .media-container:has(.vjs-fullscreen),
+    #player-wrap:has(.vjs-fullscreen) {
+      overflow: visible !important;
+    }
     /* Control bar */
     .video-js .vjs-control-bar {
       background: linear-gradient(transparent, rgba(0,0,0,.85));
@@ -363,9 +404,7 @@ router.get("/stream-page/:id", async (req, res) => {
     .video-js .vjs-big-play-button .vjs-icon-placeholder:before { color: var(--neon); font-size: 2.2rem; }
     .video-js .vjs-time-control { font-size: .78rem; padding: 0 4px; }
     .video-js .vjs-remaining-time { display: none; }
-    /* loading spinner */
     .vjs-loading-spinner { border-color: var(--neon) !important; }
-    /* error overlay */
     .video-js .vjs-error-display .vjs-modal-dialog-content { color: var(--muted); font-size: .9rem; }
     /* ── Audio ── */
     .audio-container {
@@ -550,12 +589,10 @@ router.get("/stream-page/:id", async (req, res) => {
             el.classList.add('inline-only');
             el.innerHTML = '<div class="notice-media-wrap"><img src="' + escHtml(raw) + '" loading="lazy" alt=""></div>';
           } else if (lbl === 'VIDEO' && fid) {
-            // Use HLS for notice videos too
             var hls = '/api/hls/' + fid + '/index.m3u8';
             var vid2id = 'vjsn-' + fid;
             el.classList.add('inline-only');
             el.innerHTML = '<div class="notice-media-wrap"><video id="' + vid2id + '" class="video-js vjs-big-play-centered" controls playsinline preload="metadata" style="width:100%;min-height:160px;background:#000;"></video></div>';
-            // Init after appended
             setTimeout(function() {
               var nel = document.getElementById(vid2id);
               if (!nel || typeof videojs === 'undefined') return;
@@ -611,7 +648,6 @@ router.get("/stream-page/:id", async (req, res) => {
       var vjsEl = document.getElementById('vjs-player');
       if (!vjsEl) return;
       if (typeof videojs === 'undefined') {
-        // videojs not loaded yet — retry
         setTimeout(initVideoJs, 100);
         return;
       }
@@ -630,14 +666,11 @@ router.get("/stream-page/:id", async (req, res) => {
         html5: {
           vhs: {
             overrideNative: true,
-            enableLowInitialPlaylist: false,   // don't start with lowest quality
+            enableLowInitialPlaylist: false,
             fastQualityChange: true,
             limitRenditionByPlayerDimensions: false,
-            // ── Zero-buffer tuning ────────────────────────────────────────
-            // bufferWaterLevel: how much to buffer ahead (seconds)
-            // 60s forward buffer: fetch 60s ahead so seeks never stall
-            bufferBasedABR: false,             // don't throttle — full speed always
-            bandwidth: 50 * 1024 * 1024,       // hint: 50 Mbps initial bandwidth
+            bufferBasedABR: false,
+            bandwidth: 50 * 1024 * 1024,
             experimentalBufferBasedABR: false,
           },
           nativeVideoTracks: false,
@@ -659,17 +692,15 @@ router.get("/stream-page/:id", async (req, res) => {
         },
       });
 
-      // Push VHS buffer goal to 60s after player ready
       player.ready(function() {
         try {
           var tech = player.tech({ IWillNotUseThisInPlugins: true });
           if (tech && tech.vhs) {
             tech.vhs.mediaSource_ && (tech.vhs.bandwidth = 50 * 1024 * 1024);
-            // Set buffer goals via MediaSource: 60s ahead, 30s behind
             if (tech.vhs.playlistController_) {
               var pc = tech.vhs.playlistController_;
               if (pc.mainSegmentLoader_) {
-                pc.mainSegmentLoader_.goalBufferLength_ = 60;    // 60s forward buffer
+                pc.mainSegmentLoader_.goalBufferLength_ = 60;
                 pc.mainSegmentLoader_.GOAL_BUFFER_LENGTH = 60;
               }
               if (pc.audioSegmentLoader_) {
@@ -681,10 +712,8 @@ router.get("/stream-page/:id", async (req, res) => {
         } catch(e) {}
       });
 
-      // Always try HLS first — works for ALL formats (mp4, mkv, avi, mov, etc)
       player.src({ src: hlsSrc, type: 'application/x-mpegURL' });
 
-      // If HLS fails (e.g. ffmpeg not available), fall back to direct stream
       player.on('error', function () {
         var err = player.error();
         if (err && native) {
