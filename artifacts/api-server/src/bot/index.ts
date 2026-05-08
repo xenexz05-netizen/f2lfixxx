@@ -6,6 +6,7 @@ import { logger } from "../lib/logger.js";
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID!;
+const ADMIN_ID = process.env.ADMIN_ID ? Number(process.env.ADMIN_ID) : null;
 const REQUIRED_CHANNEL_ID = -1003792781847;
 const CHANNEL_USERNAME = "PrimeAutoBotz";
 const BOT_USERNAME = "filetolink_05bot";
@@ -442,6 +443,73 @@ function formatDuration(secs: number): string {
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+
+/**
+ * /goforuser command - Admin-only broadcast to all users
+ */
+bot.command("goforuser", async (ctx) => {
+  if (!ADMIN_ID || ctx.from?.id !== ADMIN_ID) {
+    await ctx.reply("❌ You don't have permission to use this command.");
+    return;
+  }
+
+  try {
+    const msg = ctx.message as any;
+    
+    // Get all active users
+    const users = await db.select().from(usersTable).where(eq(usersTable.isActive, true));
+    
+    if (users.length === 0) {
+      await ctx.reply("📭 No active users to broadcast to.");
+      return;
+    }
+
+    let sentCount = 0;
+    let failedCount = 0;
+    const results: string[] = [];
+
+    // Handle different message types
+    let messageText = msg.text?.replace(/^\/goforuser\s+/, "") || null;
+
+    for (const user of users) {
+      try {
+        // Handle text message
+        if (messageText) {
+          await bot.telegram.sendMessage(user.chatId, messageText, { parse_mode: "HTML" });
+          sentCount++;
+        }
+        // Handle forwarded file
+        else if (msg.forward_from_chat || msg.forward_from) {
+          await bot.telegram.forwardMessage(user.chatId, ctx.chat.id, ctx.message.message_id);
+          sentCount++;
+        }
+        // Handle reply to quoted message with file
+        else if (msg.reply_to_message) {
+          const reply = msg.reply_to_message;
+          if (reply.document || reply.video || reply.audio || reply.photo) {
+            await bot.telegram.forwardMessage(user.chatId, ctx.chat.id, reply.message_id);
+            sentCount++;
+          }
+        }
+      } catch (err: any) {
+        failedCount++;
+        const errorCode = err?.response?.error_code;
+        if (errorCode === 403) {
+          // Bot is blocked, mark user as inactive
+          await db.update(usersTable).set({ isActive: false }).where(eq(usersTable.id, user.id));
+        }
+        logger.warn({ userId: user.chatId, errorCode }, "Failed to send broadcast");
+      }
+    }
+
+    const summary = `✅ Broadcast complete!\n\n📤 Sent: ${sentCount}\n❌ Failed: ${failedCount}\n👥 Total users: ${users.length}`;
+    await ctx.reply(summary);
+    logger.info({ sentCount, failedCount, totalUsers: users.length }, "Broadcast command executed");
+  } catch (err) {
+    logger.error({ err }, "Error executing /goforuser command");
+    await ctx.reply("❌ Error during broadcast. Check logs for details.");
+  }
+});
 
 export function startBot(): void {
   logger.info("Starting Telegram bot...");

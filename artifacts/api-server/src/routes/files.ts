@@ -182,9 +182,11 @@ router.get("/stream-page/:id", async (req, res) => {
       const isAudio   = file.isAudio || file.mimeType?.startsWith("audio/") || file.fileType === "audio" || file.fileType === "voice";
       const isImage   = file.mimeType?.startsWith("image/") || file.fileType === "photo" || file.fileType === "sticker";
 
-      const hlsPlaylistUrl    = `/api/hls/${file.id}/index.m3u8`;
+      const videoStreamUrl = `/api/stream-video/${file.id}`;
+      const audioStreamUrl = `/api/stream/${file.id}`;
+      const hlsPlaylistUrl = `/api/hls/${file.id}/index.m3u8`;
       const nativeBrowserFmts = ["video/mp4", "video/webm", "video/ogg"];
-      const canPlayNative     = nativeBrowserFmts.includes(file.mimeType || "");
+      const canPlayNative = nativeBrowserFmts.includes(file.mimeType || "");
 
       let mediaPlayer = "";
 
@@ -192,15 +194,34 @@ router.get("/stream-page/:id", async (req, res) => {
         mediaPlayer = `
         <div class="media-container" id="player-wrap">
           <video
-            id="vjs-player"
-            class="video-js vjs-big-play-centered vjs-theme-custom"
+            id="html5-player"
             controls
             playsinline
-            preload="auto"
-            style="width:100%;height:auto;min-height:200px;"
-            data-setup='{}'
-          ></video>
-        </div>`;
+            preload="metadata"
+            style="width:100%;height:auto;min-height:200px;background:#000;"
+          >
+            <source src="${videoStreamUrl}" type="${file.mimeType || "video/mp4"}">
+          </video>
+        </div>
+        <script>
+        (function() {
+          var video = document.getElementById('html5-player');
+          var hlsUrl = '${hlsPlaylistUrl}';
+          if (!video) return;
+          
+          video.addEventListener('error', function() {
+            console.warn('Direct stream failed, trying HLS fallback');
+            if (video.src && video.src !== hlsUrl && typeof Hls !== 'undefined') {
+              var hls = new Hls({ maxBufferLength: 60, lowLatencyMode: false });
+              hls.loadSource(hlsUrl);
+              hls.attachMedia(video);
+              hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                video.play().catch(function(e) { console.warn(e); });
+              });
+            }
+          });
+        })();
+        </script>`;
       } else if (isAudio) {
         const unsupported = ["audio/ac3", "audio/eac3", "audio/x-ac3", "audio/truehd", "audio/dts", "audio/x-dts"];
         const canPlay     = !unsupported.includes(file.mimeType || "");
@@ -208,7 +229,7 @@ router.get("/stream-page/:id", async (req, res) => {
           ? `<div class="media-container audio-container">
                <div class="audio-icon">🎵</div>
                <audio id="player" controls preload="auto" style="width:100%;">
-                 <source src="${streamUrl}" type="${file.mimeType || "audio/mpeg"}">
+                 <source src="${audioStreamUrl}" type="${file.mimeType || "audio/mpeg"}">
                </audio>
              </div>`
           : `<div class="media-container no-preview">
@@ -219,7 +240,7 @@ router.get("/stream-page/:id", async (req, res) => {
       } else if (isImage) {
         mediaPlayer = `
           <div class="media-container image-container">
-            <img src="${streamUrl}" alt="${escHtml(fileLabel)}" loading="lazy" />
+            <img src="${audioStreamUrl}" alt="${escHtml(fileLabel)}" loading="lazy" />
           </div>`;
       } else {
         mediaPlayer = `
@@ -235,8 +256,7 @@ router.get("/stream-page/:id", async (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escHtml(fileLabel)} — File2Link BOT</title>
-  <link href="https://cdnjs.cloudflare.com/ajax/libs/video.js/8.10.0/video-js.min.css" rel="stylesheet">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/video.js/8.10.0/video.min.js" defer><\/script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js" defer><\/script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;700;800&display=swap');
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -312,100 +332,22 @@ router.get("/stream-page/:id", async (req, res) => {
       background: #000;
       position: relative;
     }
-    /* ── Video.js custom theme ── */
-    .video-js {
-      width: 100% !important;
-      height: auto !important;
-      min-height: 200px;
-      background: #000;
-      font-family: 'Inter', sans-serif;
-    }
-    /* CRITICAL: absolute positioning lets vjs-tech fill the container correctly */
-    .video-js .vjs-tech {
-      position: absolute !important;
-      top: 0; left: 0;
-      width: 100% !important;
-      height: 100% !important;
-    }
-    .video-js.vjs-fill {
-      width: 100% !important;
-      height: 100% !important;
-    }
-    .vjs-fluid, .vjs-fluid.vjs-4-3, .vjs-fluid.vjs-16-9 {
-      padding-top: 0 !important;
-    }
-    /* Normal mode: fill container, object-fit keeps aspect ratio */
-    .video-js video {
+    /* ── HTML5 Video ── */
+    .media-container video {
       width: 100%;
-      height: 100%;
+      height: auto;
+      min-height: 200px;
       display: block;
-      object-fit: contain;
       background: #000;
     }
-    /* ── FULLSCREEN: cover entire screen with no gaps or clipping ── */
-    .video-js.vjs-fullscreen {
-      position: fixed !important;
-      top: 0 !important;
-      left: 0 !important;
-      width: 100vw !important;
-      height: 100vh !important;
-      max-width: none !important;
-      max-height: none !important;
-      z-index: 99999 !important;
-      border-radius: 0 !important;
-      border: none !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      background: #000 !important;
+    /* ── FULLSCREEN: cover entire screen ── */
+    .media-container video:fullscreen {
+      width: 100vw;
+      height: 100vh;
+      max-width: none;
+      max-height: none;
+      object-fit: contain;
     }
-    .video-js.vjs-fullscreen video {
-      width: 100% !important;
-      height: 100% !important;
-      max-height: none !important;
-      object-fit: contain !important;
-    }
-    .video-js.vjs-fullscreen .vjs-tech {
-      width: 100% !important;
-      height: 100% !important;
-    }
-    /* Prevent parent container from clipping the fullscreen player */
-    .media-container:has(.vjs-fullscreen),
-    #player-wrap:has(.vjs-fullscreen) {
-      overflow: visible !important;
-    }
-    /* Control bar */
-    .video-js .vjs-control-bar {
-      background: linear-gradient(transparent, rgba(0,0,0,.85));
-      height: 42px; padding: 0 6px; display: flex; align-items: center;
-    }
-    .video-js .vjs-button > .vjs-icon-placeholder:before { line-height: 42px; }
-    .video-js .vjs-play-progress { background: var(--neon); }
-    .video-js .vjs-play-progress:before { color: var(--neon); top: -0.3em; }
-    .video-js .vjs-load-progress { background: rgba(0,255,106,.25); }
-    .video-js .vjs-slider { background: rgba(255,255,255,.2); border-radius: 2px; }
-    .video-js .vjs-volume-level { background: var(--neon); }
-    .video-js .vjs-volume-level:before { color: var(--neon); }
-    .video-js .vjs-big-play-button {
-      background: rgba(0,255,106,.18);
-      border: 2px solid var(--neon);
-      border-radius: 50%;
-      width: 72px; height: 72px;
-      line-height: 68px;
-      top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      margin: 0;
-      transition: background .2s, box-shadow .2s;
-    }
-    .video-js:hover .vjs-big-play-button,
-    .video-js .vjs-big-play-button:focus {
-      background: rgba(0,255,106,.32);
-      box-shadow: 0 0 28px rgba(0,255,106,.45);
-    }
-    .video-js .vjs-big-play-button .vjs-icon-placeholder:before { color: var(--neon); font-size: 2.2rem; }
-    .video-js .vjs-time-control { font-size: .78rem; padding: 0 4px; }
-    .video-js .vjs-remaining-time { display: none; }
-    .vjs-loading-spinner { border-color: var(--neon) !important; }
-    .video-js .vjs-error-display .vjs-modal-dialog-content { color: var(--muted); font-size: .9rem; }
     /* ── Audio ── */
     .audio-container {
       padding: 28px; display: grid; place-items: center; gap: 18px;
@@ -589,20 +531,8 @@ router.get("/stream-page/:id", async (req, res) => {
             el.classList.add('inline-only');
             el.innerHTML = '<div class="notice-media-wrap"><img src="' + escHtml(raw) + '" loading="lazy" alt=""></div>';
           } else if (lbl === 'VIDEO' && fid) {
-            var hls = '/api/hls/' + fid + '/index.m3u8';
-            var vid2id = 'vjsn-' + fid;
             el.classList.add('inline-only');
-            el.innerHTML = '<div class="notice-media-wrap"><video id="' + vid2id + '" class="video-js vjs-big-play-centered" controls playsinline preload="metadata" style="width:100%;min-height:160px;background:#000;"></video></div>';
-            setTimeout(function() {
-              var nel = document.getElementById(vid2id);
-              if (!nel || typeof videojs === 'undefined') return;
-              var np = videojs(nel, { controls:true, fluid:false, responsive:false, html5:{ vhs:{ overrideNative:true } } });
-              np.src({ src: hls, type: 'application/x-mpegURL' });
-              np.on('error', function() {
-                np.error(null);
-                np.src({ src: vid, type: b.mimeType || 'video/mp4' });
-              });
-            }, 0);
+            el.innerHTML = '<div class="notice-media-wrap"><video controls playsinline preload="metadata" style="width:100%;min-height:160px;background:#000;"><source src="' + escHtml(vid) + '" type="' + escHtml(b.mimeType || 'video/mp4') + '"></video></div>';
           } else if (lbl === 'AUDIO' && raw) {
             el.innerHTML =
               '<div class="notice-file-header"><span class="notice-type-tag">AUDIO</span><span class="notice-file-name">' + name + '</span></div>' +
@@ -642,90 +572,6 @@ router.get("/stream-page/:id", async (req, res) => {
       connectSse();
     })();
   </script>
-  ${isVideo ? `
-  <script>
-    (function initVideoJs() {
-      var vjsEl = document.getElementById('vjs-player');
-      if (!vjsEl) return;
-      if (typeof videojs === 'undefined') {
-        setTimeout(initVideoJs, 100);
-        return;
-      }
-      var hlsSrc  = '${hlsPlaylistUrl}';
-      var mp4Src  = '${videoStreamUrl}';
-      var mime    = '${escHtml(file.mimeType || "video/mp4")}';
-      var native  = ${canPlayNative};
-
-      var player = videojs(vjsEl, {
-        controls: true,
-        autoplay: false,
-        preload: 'auto',
-        playsinline: true,
-        fluid: false,
-        responsive: false,
-        html5: {
-          vhs: {
-            overrideNative: true,
-            enableLowInitialPlaylist: false,
-            fastQualityChange: true,
-            limitRenditionByPlayerDimensions: false,
-            bufferBasedABR: false,
-            bandwidth: 50 * 1024 * 1024,
-            experimentalBufferBasedABR: false,
-          },
-          nativeVideoTracks: false,
-          nativeAudioTracks: false,
-          nativeTextTracks: false,
-        },
-        controlBar: {
-          children: [
-            'playToggle',
-            'volumePanel',
-            'currentTimeDisplay',
-            'timeDivider',
-            'durationDisplay',
-            'progressControl',
-            'playbackRateMenuButton',
-            'fullscreenToggle',
-          ],
-          playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
-        },
-      });
-
-      player.ready(function() {
-        try {
-          var tech = player.tech({ IWillNotUseThisInPlugins: true });
-          if (tech && tech.vhs) {
-            tech.vhs.mediaSource_ && (tech.vhs.bandwidth = 50 * 1024 * 1024);
-            if (tech.vhs.playlistController_) {
-              var pc = tech.vhs.playlistController_;
-              if (pc.mainSegmentLoader_) {
-                pc.mainSegmentLoader_.goalBufferLength_ = 60;
-                pc.mainSegmentLoader_.GOAL_BUFFER_LENGTH = 60;
-              }
-              if (pc.audioSegmentLoader_) {
-                pc.audioSegmentLoader_.goalBufferLength_ = 60;
-                pc.audioSegmentLoader_.GOAL_BUFFER_LENGTH = 60;
-              }
-            }
-          }
-        } catch(e) {}
-      });
-
-      player.src({ src: hlsSrc, type: 'application/x-mpegURL' });
-
-      player.on('error', function () {
-        var err = player.error();
-        if (err && native) {
-          console.warn('HLS failed, trying direct stream:', err);
-          player.error(null);
-          player.src({ src: mp4Src, type: mime });
-          player.load();
-          player.play();
-        }
-      });
-    })();
-  </script>` : ''}
 </body>
 </html>`;
 
