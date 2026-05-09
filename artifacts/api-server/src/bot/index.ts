@@ -446,10 +446,13 @@ function formatDuration(secs: number): string {
 
 /**
  * /goforuser command - Admin-only broadcast to all users
+ * Usage:
+ *   /goforuser Text message to broadcast
+ *   Reply to a media message and send /goforuser
  */
 bot.command("goforuser", async (ctx) => {
   if (!ADMIN_ID || ctx.from?.id !== ADMIN_ID) {
-    await ctx.reply("❌ You don't have permission to use this command.");
+    await ctx.reply("❌ You don't have permission to use this command.\n\nAdmin ID: " + (ADMIN_ID || "not set"));
     return;
   }
 
@@ -464,47 +467,60 @@ bot.command("goforuser", async (ctx) => {
       return;
     }
 
+    await ctx.reply(`🚀 Starting broadcast to ${users.length} users...`);
+
     let sentCount = 0;
     let failedCount = 0;
-    const results: string[] = [];
+    const blockedUsers: string[] = [];
+    const failedIds: number[] = [];
 
-    // Handle different message types
-    let messageText = msg.text?.replace(/^\/goforuser\s+/, "") || null;
+    // Handle different message types with text after command
+    const commandText = msg.text?.replace(/^\/goforuser\s*/, "").trim() || "";
 
     for (const user of users) {
       try {
-        // Handle text message
-        if (messageText) {
-          await bot.telegram.sendMessage(user.chatId, messageText, { parse_mode: "HTML" });
+        if (commandText) {
+          // Broadcast text message with HTML parsing
+          await bot.telegram.sendMessage(user.chatId, commandText, { 
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          });
           sentCount++;
-        }
-        // Handle forwarded file
-        else if (msg.forward_from_chat || msg.forward_from) {
-          await bot.telegram.forwardMessage(user.chatId, ctx.chat.id, ctx.message.message_id);
-          sentCount++;
-        }
-        // Handle reply to quoted message with file
-        else if (msg.reply_to_message) {
+        } else if (msg.reply_to_message) {
+          // Forward the replied message
           const reply = msg.reply_to_message;
-          if (reply.document || reply.video || reply.audio || reply.photo) {
+          if (reply.document || reply.video || reply.audio || reply.photo || reply.voice || reply.video_note || reply.animation || reply.sticker) {
             await bot.telegram.forwardMessage(user.chatId, ctx.chat.id, reply.message_id);
+            sentCount++;
+          } else if (reply.text) {
+            await bot.telegram.sendMessage(user.chatId, reply.text, { parse_mode: "HTML" });
             sentCount++;
           }
         }
+        // Small delay to avoid rate limiting
+        await new Promise(r => setTimeout(r, 10));
       } catch (err: any) {
         failedCount++;
+        failedIds.push(user.chatId);
         const errorCode = err?.response?.error_code;
         if (errorCode === 403) {
           // Bot is blocked, mark user as inactive
+          blockedUsers.push(`${user.username || user.chatId}`);
           await db.update(usersTable).set({ isActive: false }).where(eq(usersTable.id, user.id));
         }
-        logger.warn({ userId: user.chatId, errorCode }, "Failed to send broadcast");
+        logger.warn({ userId: user.chatId, errorCode, error: err?.message }, "Broadcast failed");
       }
     }
 
-    const summary = `✅ Broadcast complete!\n\n📤 Sent: ${sentCount}\n❌ Failed: ${failedCount}\n👥 Total users: ${users.length}`;
+    const details = blockedUsers.length > 0 
+      ? `\n(${blockedUsers.length} users blocked bot)`
+      : failedCount > 0
+      ? `\n(${failedCount} delivery errors)`
+      : '';
+
+    const summary = `✅ Broadcast complete!${details}\n\n📤 Sent: ${sentCount}\n❌ Failed: ${failedCount}\n👥 Total: ${users.length}`;
     await ctx.reply(summary);
-    logger.info({ sentCount, failedCount, totalUsers: users.length }, "Broadcast command executed");
+    logger.info({ sentCount, failedCount, blockedCount: blockedUsers.length, totalUsers: users.length }, "Broadcast command executed");
   } catch (err) {
     logger.error({ err }, "Error executing /goforuser command");
     await ctx.reply("❌ Error during broadcast. Check logs for details.");

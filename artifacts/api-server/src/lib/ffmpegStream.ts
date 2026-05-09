@@ -15,10 +15,13 @@ function tuneSocket(res: any): void {
     const sock = res.socket;
     if (!sock) return;
     sock.setNoDelay(true);
-    sock.setMaxListeners(30);
+    sock.setMaxListeners(50);
     if (sock.setWriteQueueHighWaterMark) sock.setWriteQueueHighWaterMark(SOCKET_WRITE_BUFFER);
     if (sock._handle?.setSendBufferSize) {
       try { sock._handle.setSendBufferSize(SOCKET_WRITE_BUFFER); } catch {}
+    }
+    if (sock._handle?.setRecvBufferSize) {
+      try { sock._handle.setRecvBufferSize(SOCKET_WRITE_BUFFER); } catch {}
     }
   } catch {}
 }
@@ -59,7 +62,12 @@ export async function streamVideoFast(
     const fSize       = fileSize ?? 0;
     const rangeHeader = req.headers["range"];
 
-    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    // CDN-optimized cache headers
+    res.setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600, stale-while-revalidate=604800");
+    res.setHeader("CDN-Cache-Control", "max-age=3600, s-maxage=3600");
+    res.setHeader("Vary", "Range, Accept-Encoding");
+    res.setHeader("Accept-Encoding", "gzip, deflate, br");
+    
     req.on("close", onAbort);
     req.on("error", onAbort);
     res.socket?.on("error", onSocketErr);
@@ -92,7 +100,7 @@ export async function streamVideoFast(
           res.once("drain", fin);
           res.once("close",  () => { aborted = true; fin(); });
           res.once("error",  () => { aborted = true; fin(); });
-          setTimeout(fin, 60_000);
+          setTimeout(fin, 180_000);
         });
       }
       return !aborted;

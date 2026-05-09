@@ -3,25 +3,28 @@ import { logger } from "./logger.js";
 import { streamFileByMessage } from "./gramjsClient.js";
 
 // ── Ultra-speed socket tuning ──────────────────────────────────────────────
-// 16 MB write buffer: absorbs burst data from 16 GramJS workers without stalling
-// At 50 Mbps that is ~2.5s of headroom — prevents backpressure entirely
+// 64 MB write buffer: absorbs burst data from 16 GramJS workers without stalling
+// At 100+ Mbps that is ~5s of headroom — prevents backpressure entirely
 // setNoDelay: disables Nagle algorithm — chunks go out immediately, no 200ms wait
-// Chunk coalescing: batch small GramJS chunks into 256 KB TCP segments
+// Chunk coalescing: batch small GramJS chunks into 1MB TCP segments
 // ──────────────────────────────────────────────────────────────────────────
-const SOCKET_WRITE_BUFFER = 16 * 1024 * 1024; // 16 MB
-const COALESCE_SIZE       = 256 * 1024;        // flush every 256 KB
+const SOCKET_WRITE_BUFFER = 64 * 1024 * 1024; // 64 MB
+const COALESCE_SIZE       = 1024 * 1024;      // flush every 1 MB
 
 function tuneSocket(res: Response): void {
   try {
     const sock = res.socket;
     if (!sock) return;
     sock.setNoDelay(true);
-    sock.setMaxListeners(30);
+    sock.setMaxListeners(50);
     if ((sock as any).setWriteQueueHighWaterMark) {
       (sock as any).setWriteQueueHighWaterMark(SOCKET_WRITE_BUFFER);
     }
     if ((sock as any)._handle?.setSendBufferSize) {
       try { (sock as any)._handle.setSendBufferSize(SOCKET_WRITE_BUFFER); } catch {}
+    }
+    if ((sock as any)._handle?.setRecvBufferSize) {
+      try { (sock as any)._handle.setRecvBufferSize(SOCKET_WRITE_BUFFER); } catch {}
     }
   } catch {}
 }
@@ -61,7 +64,16 @@ export async function streamTelegramFile(
     const isRange     = !!rangeHeader;
     const STALL_MS    = isDownload ? 600_000 : isRange ? 240_000 : 120_000;
 
-    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    // Aggressive caching for CDN (Cloudflare, etc)
+    const cacheControl = isDownload 
+      ? "private, max-age=86400"
+      : "public, max-age=3600, s-maxage=3600, stale-while-revalidate=604800";
+    
+    res.setHeader("Cache-Control", cacheControl);
+    res.setHeader("CDN-Cache-Control", "max-age=3600, s-maxage=3600");
+    res.setHeader("Vary", "Range, Accept-Encoding");
+    res.setHeader("Accept-Encoding", "gzip, deflate, br");
+    
     req.on("close", onAbort);
     req.on("error", onAbort);
     res.socket?.on("error", onSocketErr);
@@ -94,7 +106,7 @@ export async function streamTelegramFile(
           res.once("drain", fin);
           res.once("close",  () => { aborted = true; fin(); });
           res.once("error",  () => { aborted = true; fin(); });
-          setTimeout(fin, isDownload ? 120_000 : 60_000);
+          setTimeout(fin, isDownload ? 180_000 : 120_000);
         });
       }
       return !aborted;

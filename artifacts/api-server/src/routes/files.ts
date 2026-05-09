@@ -199,27 +199,61 @@ router.get("/stream-page/:id", async (req, res) => {
             playsinline
             preload="metadata"
             style="width:100%;height:auto;min-height:200px;background:#000;"
+            controlsList="nodownload"
           >
             <source src="${videoStreamUrl}" type="${file.mimeType || "video/mp4"}">
+            Your browser does not support the video tag.
           </video>
         </div>
         <script>
-        (function() {
+        (function initVideo() {
           var video = document.getElementById('html5-player');
-          var hlsUrl = '${hlsPlaylistUrl}';
           if (!video) return;
           
+          var hlsUrl = '${hlsPlaylistUrl}';
+          var direct = '${videoStreamUrl}';
+          var hlsLoaded = false;
+          
+          // Try HLS.js if available and direct fails
           video.addEventListener('error', function() {
-            console.warn('Direct stream failed, trying HLS fallback');
-            if (video.src && video.src !== hlsUrl && typeof Hls !== 'undefined') {
-              var hls = new Hls({ maxBufferLength: 60, lowLatencyMode: false });
-              hls.loadSource(hlsUrl);
-              hls.attachMedia(video);
-              hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                video.play().catch(function(e) { console.warn(e); });
-              });
+            if (hlsLoaded || !window.Hls) return;
+            hlsLoaded = true;
+            console.warn('Direct playback failed, switching to HLS');
+            if (!window.Hls.isSupported()) {
+              console.error('HLS not supported');
+              return;
             }
-          });
+            var hls = new window.Hls({ 
+              maxBufferLength: 30,
+              maxMaxBufferLength: 60,
+              lowLatencyMode: true,
+              backBufferLength: 15,
+              fragLoadingTimeOut: 20000,
+              fragLoadingMaxRetry: 6,
+              levelLoadingTimeOut: 10000,
+              levelLoadingMaxRetry: 4,
+            });
+            video.src = '';
+            hls.loadSource(hlsUrl);
+            hls.attachMedia(video);
+            hls.on('hlsManifestParsed', function() {
+              video.play().catch(function() {});
+            });
+            hls.on('hlsError', function(e, data) {
+              if (data.type === 'fatalError') {
+                hls.destroy();
+                console.error('HLS fatal error, fallback failed');
+              }
+            });
+          }, { once: true });
+          
+          // Load HLS.js if not already loaded
+          if (!window.Hls && typeof Hls === 'undefined') {
+            var script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js';
+            script.async = true;
+            document.head.appendChild(script);
+          }
         })();
         </script>`;
       } else if (isAudio) {
@@ -576,7 +610,9 @@ router.get("/stream-page/:id", async (req, res) => {
 </html>`;
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "no-store");
+      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300, stale-while-revalidate=86400");
+      res.setHeader("CDN-Cache-Control", "max-age=300, s-maxage=300");
+      res.setHeader("Vary", "Accept-Encoding");
       res.send(html);
 
     } catch (innerErr) {
