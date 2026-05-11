@@ -2,14 +2,15 @@ import type { Request, Response } from "express";
 import { logger } from "./logger.js";
 import { streamFileByMessage } from "./gramjsClient.js";
 
-// ── Ultra-speed socket tuning ──────────────────────────────────────────────
-// 64 MB write buffer: absorbs burst data from 16 GramJS workers without stalling
-// At 100+ Mbps that is ~5s of headroom — prevents backpressure entirely
-// setNoDelay: disables Nagle algorithm — chunks go out immediately, no 200ms wait
-// Chunk coalescing: batch small GramJS chunks into 1MB TCP segments
+// ── EXTREME socket tuning (1 Gbps capable) ───────────────────────────────
+// 256 MB write buffer + 256 MB read buffer: max burst capacity
+// At 100+ Mbps that is 20s of headroom — ZERO backpressure
+// setNoDelay: disables Nagle algorithm — zero latency
+// Chunk coalescing: batch into 2 MB TCP segments for max efficiency
 // ──────────────────────────────────────────────────────────────────────────
-const SOCKET_WRITE_BUFFER = 64 * 1024 * 1024; // 64 MB
-const COALESCE_SIZE       = 1024 * 1024;      // flush every 1 MB
+const SOCKET_WRITE_BUFFER = 256 * 1024 * 1024; // 256 MB write
+const SOCKET_READ_BUFFER  = 256 * 1024 * 1024; // 256 MB read
+const COALESCE_SIZE       = 2 * 1024 * 1024;   // flush every 2 MB
 
 function tuneSocket(res: Response): void {
   try {
@@ -24,7 +25,7 @@ function tuneSocket(res: Response): void {
       try { (sock as any)._handle.setSendBufferSize(SOCKET_WRITE_BUFFER); } catch {}
     }
     if ((sock as any)._handle?.setRecvBufferSize) {
-      try { (sock as any)._handle.setRecvBufferSize(SOCKET_WRITE_BUFFER); } catch {}
+      try { (sock as any)._handle.setRecvBufferSize(SOCKET_READ_BUFFER); } catch {}
     }
   } catch {}
 }

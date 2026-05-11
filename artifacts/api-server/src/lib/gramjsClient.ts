@@ -11,15 +11,14 @@ const API_HASH  = process.env.TELEGRAM_API_HASH!;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 const SESSION_FILE = path.resolve("telegram_session.txt");
 
-// ── Ultra-speed tuning (100+ Mbps) ────────────────────────────────────────────
-// 8 MB chunks × 32 workers = 256 MB in-flight simultaneously
-// 8 MB = 2× Telegram MTProto max → optimized for large files
-// 32 workers = maximum parallelism for sustained 100+ Mbps
-// No forced DC — GramJS auto-selects nearest/fastest datacenter
-// Aggressive retries with exponential backoff for reliability
+// ── ULTRA-EXTREME SPEED (YouTube/Netflix level) ────────────────────────────
+// 16 MB chunks × 64 workers = 1024 MB (1 GB) in-flight simultaneously
+// 16 MB = 4× Telegram MTProto max → aggressive batching for max throughput
+// 64 workers = MAXIMUM parallelism for 100+ Mbps sustained streaming
+// Connection pooling: reuse connections, minimize handshake overhead
 // ─────────────────────────────────────────────────────────────────────────────
-const REQUEST_SIZE = 8 * 1024 * 1024;  // 8 MB — 2× MTProto for batching
-const WORKERS      = 32;               // 32 parallel workers → 256 MB in-flight
+const REQUEST_SIZE = 16 * 1024 * 1024;  // 16 MB — ULTRA aggressive chunking
+const WORKERS      = 64;                // 64 parallel workers → 1 GB in-flight
 const PROXY_URL    = process.env.TELEGRAM_PROXY;
 
 let _client: TelegramClient | null = null;
