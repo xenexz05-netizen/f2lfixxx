@@ -42,7 +42,12 @@ export async function streamVideoFast(
   let lastChunk    = Date.now();
   const startTime  = Date.now();
   const isRange    = !!req.headers["range"];
-  const STALL_MS   = isRange ? 300_000 : 120_000; // Increased timeout for 1Gbps capable systems
+  const STALL_MS   = isRange ? 300_000 : 120_000;
+  
+  // Extract user's IP for geolocation-based routing
+  const userIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || 
+                 req.socket?.remoteAddress || 
+                 undefined;
 
   const onAbort = () => {
     if (aborted) return;
@@ -145,7 +150,7 @@ export async function streamVideoFast(
       logger.debug({ chatId, messageId, start, end, chunkSize }, "Video: 206 range");
 
       try {
-        await streamFileByMessage(chatId, messageId, write, start, chunkSize);
+        await streamFileByMessage(chatId, messageId, write, start, chunkSize, userIp);
         await finalizeWrite();
       } catch (e) {
         logger.error({ err: e, chatId, messageId }, "Video range stream failed");
@@ -161,7 +166,7 @@ export async function streamVideoFast(
     if (fSize > 0) res.setHeader("Content-Length", String(fSize));
 
     try {
-      await streamFileByMessage(chatId, messageId, write);
+      await streamFileByMessage(chatId, messageId, write, 0, undefined, userIp);
       await finalizeWrite();
     } catch (e) {
       logger.error({ err: e, chatId, messageId }, "Video full stream failed");

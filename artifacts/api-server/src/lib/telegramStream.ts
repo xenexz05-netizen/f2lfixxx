@@ -44,6 +44,11 @@ export async function streamTelegramFile(
   let bytesWritten = 0;
   let lastChunk    = Date.now();
   const startTime  = Date.now();
+  
+  // Extract user's IP for geolocation-based Telegram server routing
+  const userIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || 
+                 req.socket?.remoteAddress || 
+                 undefined;
 
   const onAbort = () => {
     if (aborted) return;
@@ -150,7 +155,7 @@ export async function streamTelegramFile(
       if (isDownload) res.setHeader("Content-Disposition", contentDisposition(fileName || "file", true));
 
       try {
-        await streamFileByMessage(chatId, messageId, write, start, chunkSize);
+        await streamFileByMessage(chatId, messageId, write, start, chunkSize, userIp);
         await finalizeWrite();
       } catch (e) {
         logger.error({ err: e, chatId, messageId, bytesWritten, start, end }, "Range stream failed");
@@ -166,7 +171,7 @@ export async function streamTelegramFile(
     res.setHeader("Content-Disposition", contentDisposition(fileName || "file", isDownload));
 
     try {
-      await streamFileByMessage(chatId, messageId, write);
+      await streamFileByMessage(chatId, messageId, write, 0, undefined, userIp);
       await finalizeWrite();
     } catch (e) {
       logger.error({ err: e, chatId, messageId }, "Full stream failed");

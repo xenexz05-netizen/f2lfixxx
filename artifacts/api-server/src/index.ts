@@ -2,7 +2,7 @@ import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { startBot } from "./bot/index.js";
 import { startPushBot } from "./bot/pushBot.js";
-import { getGramjsClient } from "./lib/gramjsClient.js";
+import { initializeClients } from "./lib/gramjsClient.js";
 import { startCleanupJob } from "./lib/cleanupJob.js";
 
 const rawPort = process.env["PORT"];
@@ -20,9 +20,9 @@ app.listen(port, (err?: Error) => {
   startPushBot();
   startCleanupJob();
 
-  // Warm up GramJS client in background — ready before first request
-  getGramjsClient().catch((gramErr) => {
-    logger.error({ err: gramErr }, "Failed to init MTProto client");
+  // Warm up dual MTProto clients in background — ready before first request
+  initializeClients().catch((gramErr) => {
+    logger.error({ err: gramErr }, "Failed to init MTProto clients");
   });
 });
 
