@@ -1,6 +1,15 @@
 import type { Request, Response } from "express";
 import { logger } from "./logger.js";
 import { streamFileByMessage } from "./gramjsClient.js";
+import {
+  optimizeConnection,
+  setStreamingHeaders,
+  estimateBandwidth,
+  recordBandwidth,
+  sendEarlyHints,
+  pushCriticalResources,
+  StreamMetrics,
+} from "./streamOptimizer.js";
 
 // ── 1GBPS EXTREME socket tuning ──────────────────────────────────────────
 // 512 MB write + 512 MB read buffer: MAXIMUM burst capacity for 1Gbps
@@ -70,24 +79,23 @@ export async function streamTelegramFile(
     const isRange     = !!rangeHeader;
     const STALL_MS    = isDownload ? 600_000 : isRange ? 240_000 : 120_000;
 
-    // Aggressive caching for CDN (Cloudflare, etc)
-    const cacheControl = isDownload 
-      ? "private, max-age=86400"
-      : "public, max-age=3600, s-maxage=3600, stale-while-revalidate=604800";
-    
-    res.setHeader("Cache-Control", cacheControl);
-    res.setHeader("CDN-Cache-Control", "max-age=3600, s-maxage=3600");
-    res.setHeader("Vary", "Range, Accept-Encoding");
-    res.setHeader("Accept-Encoding", "gzip, deflate, br");
+    // Netflix/YouTube-level optimization
+    optimizeConnection(req, res);
+    setStreamingHeaders(res, contentType, fileSize, fileName, isDownload);
+    sendEarlyHints(res);
+    pushCriticalResources(res);
     
     req.on("close", onAbort);
     req.on("error", onAbort);
     res.socket?.on("error", onSocketErr);
     tuneSocket(res);
 
+    const metrics = new StreamMetrics();  // Track streaming quality
+    
     stall = setInterval(() => {
       if (!aborted && bytesWritten > 0 && Date.now() - lastChunk > STALL_MS) {
         aborted = true;
+        metrics.log("Stall detected");
         logger.warn({ chatId, messageId, bytesWritten }, "Stream stalled — closing");
         try { if (!res.writableEnded) res.end(); } catch {}
       }
@@ -104,6 +112,7 @@ export async function streamTelegramFile(
       coalescedSize  = 0;
       lastChunk      = Date.now();
       bytesWritten  += combined.length;
+      metrics.recordChunk(combined.length);  // Track for bandwidth measurement
       const ok = res.write(combined);
       if (!ok) {
         await new Promise<void>((resolve) => {

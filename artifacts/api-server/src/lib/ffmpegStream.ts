@@ -1,6 +1,13 @@
 import type { Request, Response } from "express";
 import { streamFileByMessage } from "./gramjsClient.js";
 import { logger } from "./logger.js";
+import {
+  optimizeConnection,
+  setStreamingHeaders,
+  sendEarlyHints,
+  pushCriticalResources,
+  StreamMetrics,
+} from "./streamOptimizer.js";
 
 // ── 1GBPS EXTREME video streaming (MAXIMUM throughput) ───────────────────
 // 512 MB socket buffer + 4 MB chunk coalescing = MAXIMUM 1Gbps throughput
@@ -68,20 +75,23 @@ export async function streamVideoFast(
     const fSize       = fileSize ?? 0;
     const rangeHeader = req.headers["range"];
 
-    // CDN-optimized cache headers
-    res.setHeader("Cache-Control", "public, max-age=3600, s-maxage=3600, stale-while-revalidate=604800");
-    res.setHeader("CDN-Cache-Control", "max-age=3600, s-maxage=3600");
-    res.setHeader("Vary", "Range, Accept-Encoding");
-    res.setHeader("Accept-Encoding", "gzip, deflate, br");
+    // Netflix/YouTube-level optimization
+    optimizeConnection(req, res);
+    setStreamingHeaders(res, contentType, fSize, _fileName, false);
+    sendEarlyHints(res);
+    pushCriticalResources(res);
     
     req.on("close", onAbort);
     req.on("error", onAbort);
     res.socket?.on("error", onSocketErr);
     tuneSocket(res);
 
+    const metrics = new StreamMetrics();  // Track streaming quality
+    
     stall = setInterval(() => {
       if (!aborted && bytesWritten > 0 && Date.now() - lastChunk > STALL_MS) {
         aborted = true;
+        metrics.log("Stall detected");
         logger.warn({ chatId, messageId, bytesWritten }, "Video stream stalled — stopping");
         try { if (!res.writableEnded) res.end(); } catch {}
       }
@@ -98,6 +108,7 @@ export async function streamVideoFast(
       coalescedSize  = 0;
       lastChunk      = Date.now();
       bytesWritten  += combined.length;
+      metrics.recordChunk(combined.length);  // Track for bandwidth measurement
       const ok = res.write(combined);
       if (!ok) {
         await new Promise<void>((resolve) => {

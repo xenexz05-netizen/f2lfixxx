@@ -8,6 +8,7 @@ import { streamVideoFast } from "../lib/ffmpegStream.js";
 import { getProgress } from "../lib/videoCache.js";
 import { readPlaylist, getSegmentFile } from "../lib/hlsTranscoder.js";
 import { formatFileSize, getFileTypeLabel } from "../lib/fileUtils.js";
+import { injectResourceHints, getCriticalCSS } from "../lib/streamOptimizer.js";
 
 const router = Router();
 
@@ -290,6 +291,9 @@ router.get("/stream-page/:id", async (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escHtml(fileLabel)} — File2Link BOT</title>
+  <!-- Netflix/YouTube-level streaming optimization -->
+  ${injectResourceHints()}
+  ${getCriticalCSS()}
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js" defer><\/script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Manrope:wght@400;500;700;800&display=swap');
@@ -610,9 +614,12 @@ router.get("/stream-page/:id", async (req, res) => {
 </html>`;
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
-      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300, stale-while-revalidate=86400");
-      res.setHeader("CDN-Cache-Control", "max-age=300, s-maxage=300");
-      res.setHeader("Vary", "Accept-Encoding");
+      // Netflix/YouTube-level optimization: aggressive edge caching + long stale window
+      res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300, stale-while-revalidate=604800, stale-if-error=2592000");
+      res.setHeader("CDN-Cache-Control", "max-age=300, s-maxage=300, stale-while-revalidate=604800");
+      res.setHeader("Vary", "Accept-Encoding, Accept");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
       res.send(html);
 
     } catch (innerErr) {
