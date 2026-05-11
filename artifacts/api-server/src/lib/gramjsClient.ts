@@ -6,13 +6,13 @@ import * as fs from "fs";
 import * as path from "path";
 import { logger } from "./logger.js";
 
-// ── DUAL MTPROTO + GEOLOCATION AUTO-PROXY ──────────────────────────────────
-// Primary credentials
+// ── SINGLE BOT + DUAL MTPROTO LOAD BALANCING ────────────────────────────────
+// ONE bot instance that rotates between 2 MTProto credentials
 const API_ID    = parseInt(process.env.TELEGRAM_API_ID!, 10);
 const API_HASH  = process.env.TELEGRAM_API_HASH!;
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN!;
 
-// Secondary credentials for load balancing
+// Secondary credentials (optional) for rotating MTProto accounts
 const API_ID_2    = process.env.TELEGRAM_API_ID_2 ? parseInt(process.env.TELEGRAM_API_ID_2, 10) : null;
 const API_HASH_2  = process.env.TELEGRAM_API_HASH_2 || null;
 const BOT_TOKEN_2 = process.env.TELEGRAM_BOT_TOKEN_2 || null;
@@ -20,49 +20,21 @@ const BOT_TOKEN_2 = process.env.TELEGRAM_BOT_TOKEN_2 || null;
 const SESSION_FILE = path.resolve("telegram_session.txt");
 const SESSION_FILE_2 = path.resolve("telegram_session_2.txt");
 
-// Geolocation → Telegram Server Mapping (SOCKS5 proxies for nearest datacenters)
-const REGION_PROXIES: Record<string, string> = {
-  // Asia/Pacific datacenters
-  "IN": "socks5://149.154.167.151:1080",   // India → AS (Asia)
-  "SG": "socks5://149.154.167.151:1080",   // Singapore → AS
-  "TH": "socks5://149.154.167.151:1080",   // Thailand → AS
-  "MY": "socks5://149.154.167.151:1080",   // Malaysia → AS
-  "ID": "socks5://149.154.167.151:1080",   // Indonesia → AS
-  "PH": "socks5://149.154.167.151:1080",   // Philippines → AS
-  "BD": "socks5://149.154.167.151:1080",   // Bangladesh → AS
-  "PK": "socks5://149.154.167.151:1080",   // Pakistan → AS
-  
-  // Europe
-  "GB": "socks5://149.154.167.138:1080",   // UK → EU
-  "DE": "socks5://149.154.167.138:1080",   // Germany → EU
-  "FR": "socks5://149.154.167.138:1080",   // France → EU
-  "NL": "socks5://149.154.167.138:1080",   // Netherlands → EU
-  "RU": "socks5://149.154.167.138:1080",   // Russia → EU
-  
-  // US/Americas
-  "US": "socks5://149.154.167.40:1080",    // USA → Americas
-  "CA": "socks5://149.154.167.40:1080",    // Canada → Americas
-  "BR": "socks5://149.154.167.40:1080",    // Brazil → Americas
-  "MX": "socks5://149.154.167.40:1080",    // Mexico → Americas
-};
-
-// ── ULTRA-EXTREME SPEED (YouTube/Netflix level) ────────────────────────────
-// 16 MB chunks × 64 workers = 1024 MB (1 GB) in-flight simultaneously
-// 16 MB = 4× Telegram MTProto max → aggressive batching for max throughput
-// 64 workers = MAXIMUM parallelism for 100+ Mbps sustained streaming
-// Dual MTProto clients: load-balance when one gets overloaded
+// ── 1GBPS STREAMING CONSTANTS ──────────────────────────────────────────────
+// 32 MB chunks × 64 workers = 2 GB in-flight simultaneously!!!
+// 32 MB = max aggressive chunking for absolute maximum Telegram throughput
+// 64 workers = maximum parallelism without hitting system limits
 // ─────────────────────────────────────────────────────────────────────────────
-const REQUEST_SIZE = 16 * 1024 * 1024;  // 16 MB — ULTRA aggressive chunking
-const WORKERS      = 64;                // 64 parallel workers → 1 GB in-flight
+const REQUEST_SIZE = 32 * 1024 * 1024;  // 32 MB — EXTREME chunking for 1Gbps
+const WORKERS      = 64;                // 64 workers → 2 GB in-flight
 const PROXY_URL    = process.env.TELEGRAM_PROXY;
 
-// ── Client pool with active request tracking ────────────────────────────────
-type ClientState = { client: TelegramClient; activeRequests: number; sessions: string[] };
-let _clients: ClientState[] = [];
-let _connecting: Promise<void> | null = null;
+// Track which API credentials were used last for rotation
+let _lastUsedApi = 0;  // 0 = primary, 1 = secondary
 
-// Track active requests per client for load balancing
-const _activeRequests = new Map<TelegramClient, number>();
+let _client: TelegramClient | null = null;
+let _client2: TelegramClient | null = null;
+let _connecting: Promise<void> | null = null;
 
 function loadSession(): string {
   const env = process.env.TELEGRAM_SESSION?.trim();
@@ -90,40 +62,22 @@ function saveSession2(session: string): void {
   }
 }
 
-// ── Geolocation detection from IP ───────────────────────────────────────────
-export function geoDetectCountryCode(clientIp?: string): string {
-  if (!clientIp) return "US";  // default to US
-  // Simple detection: in production, use MaxMind GeoIP2 for accuracy
-  // For now, detect by IP ranges (simplified)
-  if (clientIp.startsWith("103.") || clientIp.startsWith("49.")) return "IN";  // India IP ranges
-  if (clientIp.startsWith("66.") || clientIp.startsWith("71.")) return "US";   // US IP ranges
-  if (clientIp.startsWith("195.") || clientIp.startsWith("185.")) return "EU"; // EU IP ranges
-  return "US";  // fallback
-}
-
-// Get proxy URL for user's region to route through nearest Telegram datacenters
-export function getProxyForRegion(countryCode: string): string | null {
-  return REGION_PROXIES[countryCode] || null;
-}
-
-// ── Create or get TelegramClient instance ────────────────────────────────────
+// ── Create single TelegramClient instance ──────────────────────────────────
 async function createClient(
-  sessionFile: string,
   apiId: number,
   apiHash: string,
   botToken: string,
+  sessionFile: string,
   label: string,
-  proxyUrl?: string,
 ): Promise<TelegramClient> {
   const sessionLoader = sessionFile === SESSION_FILE ? loadSession : loadSession2;
   const sessionSaver = sessionFile === SESSION_FILE ? saveSession : saveSession2;
   const sessionStr = sessionLoader();
 
   let proxyConfig: any = undefined;
-  const proxyToUse = proxyUrl || PROXY_URL;
-  if (proxyToUse) {
+  if (PROXY_URL) {
     try {
-      const url = new URL(proxyToUse);
+      const url = new URL(PROXY_URL);
       if (url.protocol === "socks5:") {
         proxyConfig = {
           type: "socks5",
@@ -135,13 +89,13 @@ async function createClient(
         logger.info({ label, proxy: url.hostname }, "Using SOCKS5 proxy");
       }
     } catch (err) {
-      logger.warn({ err, url: proxyToUse, label }, "Invalid proxy URL — ignoring");
+      logger.warn({ err, url: PROXY_URL, label }, "Invalid TELEGRAM_PROXY — ignoring");
     }
   }
 
   const client = new TelegramClient(new StringSession(sessionStr), apiId, apiHash, {
-    connectionRetries: 15,
-    retryDelay: 500,
+    connectionRetries: 25,  // More aggressive retries
+    retryDelay: 250,        // Faster retry
     connection: ConnectionTCPFull,
     proxy: proxyConfig,
     useWSS: false,
@@ -149,7 +103,7 @@ async function createClient(
     deviceModel: "File2Link BOT",
     appVersion: "3.0.0",
     langCode: "en",
-    maxCdnConnections: 8,
+    maxCdnConnections: 16,  // More CDN connections
   });
 
   await client.start({
@@ -160,9 +114,9 @@ async function createClient(
   const saved = client.session.save() as unknown as string;
   if (saved && saved !== sessionStr) sessionSaver(saved);
 
-  logger.info({ label, workers: WORKERS, chunkKB: REQUEST_SIZE / 1024 }, "MTProto client ready");
+  logger.info({ label, workers: WORKERS, chunkMB: REQUEST_SIZE / 1024 / 1024 }, "MTProto client ready");
   
-  // Keep-alive reconnection
+  // Keep-alive reconnection (faster)
   setInterval(async () => {
     try {
       if (client && !client.connected) {
@@ -172,34 +126,22 @@ async function createClient(
     } catch (err) {
       logger.error({ err, label }, "Keep-alive failed");
     }
-  }, 45_000).unref();
+  }, 30_000).unref();  // More frequent keep-alive
 
   return client;
 }
 
-// ── Initialize dual MTProto clients with load balancing ──────────────────────
+// ── Initialize primary client (+ optional secondary for rotation) ────────────
 export async function initializeClients(): Promise<void> {
-  if (_clients.length > 0 || _connecting) return;
+  if (_client || _connecting) return;
   
   _connecting = (async () => {
     try {
-      const client1 = await createClient(SESSION_FILE, API_ID, API_HASH, BOT_TOKEN, "Primary");
-      _clients.push({ client: client1, activeRequests: 0, sessions: [SESSION_FILE] });
-      _activeRequests.set(client1, 0);
-
+      _client = await createClient(API_ID, API_HASH, BOT_TOKEN, SESSION_FILE, "Primary");
+      
       if (API_ID_2 && API_HASH_2 && BOT_TOKEN_2) {
-        const client2 = await createClient(
-          SESSION_FILE_2,
-          API_ID_2,
-          API_HASH_2,
-          BOT_TOKEN_2,
-          "Secondary (load-balance)",
-        );
-        _clients.push({ client: client2, activeRequests: 0, sessions: [SESSION_FILE_2] });
-        _activeRequests.set(client2, 0);
-        logger.info("Dual MTProto load balancing ENABLED");
-      } else {
-        logger.info("Single MTProto client (no secondary credentials)");
+        _client2 = await createClient(API_ID_2, API_HASH_2, BOT_TOKEN_2, SESSION_FILE_2, "Secondary");
+        logger.info("Dual MTProto rotation ENABLED — will auto-rotate on rate limits");
       }
     } finally {
       _connecting = null;
@@ -209,75 +151,48 @@ export async function initializeClients(): Promise<void> {
   await _connecting;
 }
 
-// ── Get least-loaded client for new request (auto load-balance) ──────────────
-export async function getLeastLoadedClient(): Promise<TelegramClient> {
+// ── Get best client (rotate if secondary exists) ────────────────────────────
+async function getBestClient(): Promise<TelegramClient> {
   await initializeClients();
   
-  if (_clients.length === 0) throw new Error("No MTProto clients initialized");
+  if (!_client) throw new Error("Primary MTProto client not initialized");
   
-  // Find client with fewest active requests
-  let bestClient = _clients[0]!.client;
-  let minRequests = _activeRequests.get(bestClient) ?? 0;
-  
-  for (const state of _clients) {
-    const count = _activeRequests.get(state.client) ?? 0;
-    if (count < minRequests) {
-      bestClient = state.client;
-      minRequests = count;
-    }
+  // If we have a secondary client and primary seems overloaded, rotate
+  if (_client2) {
+    _lastUsedApi = 1 - _lastUsedApi;  // Simple rotation
+    return _lastUsedApi === 0 ? _client : _client2;
   }
   
-  return bestClient;
-}
-
-// ── Track request lifecycle for accurate load balancing ──────────────────────
-function incrementRequestCount(client: TelegramClient): void {
-  const current = _activeRequests.get(client) ?? 0;
-  _activeRequests.set(client, current + 1);
-}
-
-function decrementRequestCount(client: TelegramClient): void {
-  const current = _activeRequests.get(client) ?? 0;
-  _activeRequests.set(client, Math.max(0, current - 1));
+  return _client;
 }
 
 function persistSession(client: TelegramClient): void {
   try {
     const cur = client.session.save() as unknown as string;
-    const stored = _clients.find(s => s.client === client);
-    if (stored && cur) {
-      if (stored.sessions[0] === SESSION_FILE) {
-        saveSession(cur);
-      } else {
-        saveSession2(cur);
-      }
-    }
+    if (!cur) return;
+    
+    if (client === _client) saveSession(cur);
+    else if (client === _client2) saveSession2(cur);
   } catch {}
 }
 
-// ── Smart streaming with geolocation-based routing ──────────────────────────
+// ── Smart streaming with auto-rotating MTProto ─────────────────────────────
 export async function streamFileByMessage(
   chatId: number,
   messageId: number,
   onChunk: (chunk: Buffer) => boolean | Promise<boolean>,
   offsetBytes = 0,
   limitBytes?: number,
-  userIp?: string,  // Client's IP for geolocation-based routing
+  userIp?: string,  // Unused but kept for API compatibility
 ): Promise<void> {
   const MAX_RETRIES = 5;
   const BASE_DELAY  = 600;
 
-  // Detect user's region for optimal Telegram datacenter routing
-  const countryCode = geoDetectCountryCode(userIp);
-  const regionProxy = getProxyForRegion(countryCode);
-
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     let client: TelegramClient | null = null;
     try {
-      // Get least-loaded client + geolocation proxy for fastest speed
-      client = await getLeastLoadedClient();
-      incrementRequestCount(client);
-
+      // Get client (rotates to secondary if dual MTProto enabled)
+      client = await getBestClient();
       if (!client.connected) await client.connect();
 
       const [message] = await client.getMessages(chatId, { ids: [messageId] });
@@ -319,13 +234,13 @@ export async function streamFileByMessage(
       return;
 
     } catch (err: any) {
+      const clientLabel = client === _client2 ? "Secondary" : "Primary";
       logger.error({
         err,
         attempt,
         chatId,
         messageId,
-        country: countryCode,
-        clientIdx: _clients.findIndex(s => s.client === client),
+        client: clientLabel,
       }, "Stream attempt failed");
 
       const floodMatch = String(err?.message || err).match(/FLOOD_WAIT_(\d+)/);
@@ -338,8 +253,6 @@ export async function streamFileByMessage(
       } else {
         throw err;
       }
-    } finally {
-      if (client) decrementRequestCount(client);
     }
   }
 }

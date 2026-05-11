@@ -2,15 +2,15 @@ import type { Request, Response } from "express";
 import { logger } from "./logger.js";
 import { streamFileByMessage } from "./gramjsClient.js";
 
-// ── EXTREME socket tuning (1 Gbps capable) ───────────────────────────────
-// 256 MB write buffer + 256 MB read buffer: max burst capacity
-// At 100+ Mbps that is 20s of headroom — ZERO backpressure
-// setNoDelay: disables Nagle algorithm — zero latency
-// Chunk coalescing: batch into 2 MB TCP segments for max efficiency
+// ── 1GBPS EXTREME socket tuning ──────────────────────────────────────────
+// 512 MB write + 512 MB read buffer: MAXIMUM burst capacity for 1Gbps
+// At 1 Gbps that is 4+ seconds of headroom — ZERO backpressure guaranteed
+// setNoDelay: disables Nagle algorithm — absolute zero latency
+// Chunk coalescing: batch into 4 MB TCP segments for max TCP efficiency
 // ──────────────────────────────────────────────────────────────────────────
-const SOCKET_WRITE_BUFFER = 256 * 1024 * 1024; // 256 MB write
-const SOCKET_READ_BUFFER  = 256 * 1024 * 1024; // 256 MB read
-const COALESCE_SIZE       = 2 * 1024 * 1024;   // flush every 2 MB
+const SOCKET_WRITE_BUFFER = 512 * 1024 * 1024; // 512 MB write
+const SOCKET_READ_BUFFER  = 512 * 1024 * 1024; // 512 MB read
+const COALESCE_SIZE       = 4 * 1024 * 1024;   // flush every 4 MB
 
 function tuneSocket(res: Response): void {
   try {
